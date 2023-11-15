@@ -15,7 +15,7 @@ LOG2P = 8
 DIM = 512
 BITS = ((2**LOG2Q - 1)**2 * DIM).bit_length() # Maximum integer size.
 KAPPA = 40 # Statistical security level.
-L = math.ceil((BITS + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
+L = 2 # math.ceil((ORDER.bit_length() + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
 
 def key_gen(protocol: AdditiveProtocolSuite) -> AdditiveArrayShare:
     (bits, vals) = protocol.random_bitwise_secret(bits=LOG2Q, shape=(DIM,))
@@ -27,12 +27,23 @@ def evaluate(
     hx: numpy.ndarray,
 ) -> AdditiveArrayShare:
     # r = a * k
-    r = [protocol.dot(row, key) for row in hx]
+    def field_dot(x, y):
+        """Vector dot product with support for plaintext values."""
+        result = protocol.field_multiply(x, y)
+        return protocol.sum(result)
+    r = [field_dot(hxi, key) for hxi in hx]
+    # r = AdditiveArrayShare(r)
     
     # r = round(r)
-    r = [round(ri) for ri in r]
+    r = [round(protocol, ri) for ri in r]
+    # communicator = protocol.communicator
+    # log = Logger(logger=logging.getLogger(), communicator=communicator)
+    # for i, ri in enumerate(r):
+    #     # log.info(f"r[{i}] (Player {communicator.rank}): {ri}")
+    #     ri = protocol.reveal(ri)
+    #     log.info(f"r[{i}] revealed (Player {communicator.rank}): {ri}")
     
-    return compose(r)
+    return compose(protocol, r)
     
 def round(
     protocol: AdditiveProtocolSuite,
@@ -53,11 +64,11 @@ def compose(
         p2_shift = i * log2_p2
         return max(0, p1_shift + p2_shift)
     
-    acc = 0
+    acc = protocol.field(0)
     for i, ai in enumerate(a):
-        pi = 1 << shift(i)
-        ai_mul_pi = protocol.multiply(ai, pi)
-        acc = protocol.add(acc, ai_mul_pi)
+        pi = protocol.field(1 << shift(i))
+        ai_mul_pi = protocol.field_multiply(ai, pi)
+        acc = protocol.field_add(acc, ai_mul_pi)
     return acc
 
 def main(communicator: SocketCommunicator):
@@ -70,7 +81,7 @@ def main(communicator: SocketCommunicator):
     )
     
     key = key_gen(protocol)    
-    hx = numpy.ones((L, DIM), dtype=int)
+    hx = protocol.field(numpy.arange(L * DIM).reshape(L, DIM))
     y = evaluate(protocol, key, hx)
     
     y_revealed = protocol.reveal(y)
