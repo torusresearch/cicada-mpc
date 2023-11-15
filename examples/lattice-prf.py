@@ -15,7 +15,7 @@ LOG2P = 8
 DIM = 512
 BITS = ((2**LOG2Q - 1)**2 * DIM).bit_length() # Maximum integer size.
 KAPPA = 40 # Statistical security level.
-L = 2 # math.ceil((ORDER.bit_length() + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
+L = math.ceil((ORDER.bit_length() + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
 
 def key_gen(protocol: AdditiveProtocolSuite) -> AdditiveArrayShare:
     (bits, vals) = protocol.random_bitwise_secret(bits=LOG2Q, shape=(DIM,))
@@ -31,17 +31,11 @@ def evaluate(
         """Vector dot product with support for plaintext values."""
         result = protocol.field_multiply(x, y)
         return protocol.sum(result)
-    r = [field_dot(hxi, key) for hxi in hx]
-    # r = AdditiveArrayShare(r)
+    r = list(field_dot(hxi, key).storage for hxi in hx)
+    r = AdditiveArrayShare(numpy.stack(r))
     
     # r = round(r)
-    r = [round(protocol, ri) for ri in r]
-    # communicator = protocol.communicator
-    # log = Logger(logger=logging.getLogger(), communicator=communicator)
-    # for i, ri in enumerate(r):
-    #     # log.info(f"r[{i}] (Player {communicator.rank}): {ri}")
-    #     ri = protocol.reveal(ri)
-    #     log.info(f"r[{i}] revealed (Player {communicator.rank}): {ri}")
+    r = round(protocol, r)
     
     return compose(protocol, r)
     
@@ -49,13 +43,13 @@ def round(
     protocol: AdditiveProtocolSuite,
     x: AdditiveArrayShare,
 ) -> AdditiveArrayShare:
-    bits = protocol.bit_decompose(x, bits=BITS)
-    slice = bits[LOG2Q-LOG2P:LOG2Q]
+    bits = protocol.bit_decompose(x, bits=BITS)    
+    slice = bits[:, LOG2Q-LOG2P:LOG2Q]
     return protocol.bit_compose(slice)
 
 def compose(
     protocol: AdditiveProtocolSuite,
-    a: list[AdditiveArrayShare]
+    a: AdditiveArrayShare
 ) -> AdditiveArrayShare:    
     log2_p1 = LOG2Q - LOG2P
     log2_p2 = 2 * LOG2P - LOG2Q
@@ -87,4 +81,4 @@ def main(communicator: SocketCommunicator):
     y_revealed = protocol.reveal(y)
     log.info(f"Output (Player {communicator.rank}): {y_revealed}")
 
-SocketCommunicator.run(world_size=4, fn=main)
+SocketCommunicator.run(world_size=3, fn=main)
