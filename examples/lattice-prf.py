@@ -43,8 +43,9 @@ def round(
     protocol: AdditiveProtocolSuite,
     x: AdditiveArrayShare,
 ) -> AdditiveArrayShare:
-    # return protocol.right_shift(x, bits=LOG2Q)
     return trunc(protocol, x, BITS, LOG2Q-LOG2P, LOG2Q)
+    # x_prime = trunc_top(protocol, x, BITS, LOG2Q)
+    # return trunc_bot(protocol, x_prime, BITS, LOG2Q-LOG2P)
     
     # bits = protocol.bit_decompose(x, bits=BITS)    
     # slice = bits[:, LOG2Q-LOG2P:LOG2Q]
@@ -59,54 +60,167 @@ def trunc(
 ) -> AdditiveArrayShare:
     """
     Truncate the top and bottom bits of the `k`-bit integer `a`. Returns the
-    integer corresponding to the bits in the range `[m1:m2]`.
+    integer corresponding to the bits in the range `[m1:m2]` (least-significant
+    bit first).
     """
-    (r_dprime, r_prime, r) = prandm(protocol, k, m2)
+    communicator = protocol.communicator
+    log = Logger(logger=logging.getLogger(), communicator=communicator)
+    
+    r_dprime, r_prime, r = prandm(protocol, k, m2, shape=a.storage.shape)
+    
     # c = (2^(k-1) + a + 2^m2 * r_dprime + r_prime).reveal()
+    two_pow_ksub1 = protocol.field.full_like(a.storage, 2**(k-1))
+    two_pow_m2 = protocol.field.full_like(a.storage, 2**m2)
+    log.info(f"Player {communicator.rank}: before compute c")
     c = protocol.field_add(
-        protocol.field(2**(k-1)),
+        two_pow_ksub1,
         protocol.field_add(
             a,
             protocol.field_add(
-                protocol.field_multiply(2**m2, r_dprime),
+                protocol.field_multiply(two_pow_m2, r_dprime),
                 r_prime,
             ),
         ),
     )
     c = protocol.reveal(c)
+    log.info(f"Player {communicator.rank}: after compute c")
 
     # Compute separate c_prime for m1 and m2.
-    c1_prime, c2_prime = c % 2**m1, c % 2**m2
-    u1 = protocol._public_bitwise_less_than(c1_prime, r[:m1])
-    u2 = protocol._public_bitwise_less_than(c2_prime, r[:m2])
+    c1_prime = protocol.field.full_like(a.storage, c % 2**m1)
+    c2_prime = protocol.field.full_like(a.storage, c % 2**m2)
+    u1 = protocol._public_bitwise_less_than(lhspub=c1_prime, rhs=r[:, -m1:])
+    u2 = protocol._public_bitwise_less_than(lhspub=c2_prime, rhs=r[:, -m2:])
+    
+    log.info(f"Player {communicator.rank}: after ltl")
+    log.info(f"Player {communicator.rank}: after ltl: u1 = {protocol.reveal(u1)}, u2 = {protocol.reveal(u2)}")
+    log.info(f"Player {communicator.rank}: after ltl: c1_prime = {c1_prime}, c2_prime = {c2_prime}")
     
     # a1_prime = c1_prime - bit_compose(r[:m1]) + u1 * 2^m1
+    two_pow_m1 = protocol.field.full_like(a.storage, 2**m1)
     a1_prime = protocol.field_add(
         protocol.field_subtract(
             c1_prime,
-            protocol.bit_compose(r[:m1])
+            protocol.bit_compose(r[:, -m1:])
         ),
-        protocol.field_multiply(u1, 2**m1),
+        protocol.field_multiply(u1, two_pow_m1),
     )
     # a2_prime = c2_prime - r_prime + u2 * 2^m2
     a2_prime = protocol.field_add(
         protocol.field_subtract(
             c2_prime,
-            protocol.bit_compose(r[:m2])
+            protocol.bit_compose(r[:, -m2:])
         ),
-        protocol.field_multiply(u2, 2**m2),
-    )
-    field_inverse = lambda x: pow(x, protocol.field.order - 2, protocol.field.order)
-    return protocol.field_multiply(
-        protocol.field_subtract(a2_prime, a1_prime),
-        field_inverse(2**m1),
+        protocol.field_multiply(u2, two_pow_m2),
     )
     
-def prandm(protocol: AdditiveProtocolSuite, k: int, m: int) -> (AdditiveArrayShare, AdditiveArrayShare, AdditiveArrayShare):
+    a1_prime_clear = protocol.reveal(a1_prime)[0]
+    a2_prime_clear = protocol.reveal(a2_prime)[0]
+    log.info(f"Player {communicator.rank}: after compute a_prime")
+    log.info(f"Player {communicator.rank}: a1_prime = {a1_prime_clear} = {bin(a1_prime_clear)}, a2_prime = {a2_prime_clear} = {bin(a2_prime_clear)}")
+    log.info(f"Player {communicator.rank}: a2_prime - a1_prime = {a2_prime_clear - a1_prime_clear} = {bin(a2_prime_clear - a1_prime_clear)}")
+    
+    a_clear = protocol.reveal(a)[0]
+    trunc_a = int(bin(a_clear)[2:][-m2:-m1], 2)
+    log.info(f"Player {communicator.rank}: a = {a_clear} = {bin(a_clear)}, trunc(a) = {trunc_a} = {bin(trunc_a)}")
+    
+    # (a2_prime - a1_prime) / 2^m1
+    invert = lambda x: pow(x, protocol.field.order - 2, protocol.field.order)
+    two_pow_m1_inv = protocol.field.full_like(a.storage, invert(2**m1))
+    return protocol.field_multiply(
+        protocol.field_subtract(a2_prime, a1_prime),
+        two_pow_m1_inv,
+    )
+    
+def trunc_top(
+    protocol: AdditiveProtocolSuite,
+    a: AdditiveArrayShare,
+    k: int,
+    m: int,
+) -> AdditiveArrayShare:
+    """
+    Truncate the top bits of the `k`-bit integer `a`. Returns the integer
+    corresponding to the bits in the range `[:m]` (least-significant bit first).
+    """
+    communicator = protocol.communicator
+    log = Logger(logger=logging.getLogger(), communicator=communicator)
+    
+    a_clear = protocol.reveal(a)[0]
+    trunc_a = int(bin(a_clear)[2:][-m:], 2)
+    log.info(f"Player {communicator.rank}: a = {a_clear} = {bin(a_clear)}, trunc(a) = {trunc_a} = {bin(trunc_a)}")
+    
+    r_dprime, r_prime, r = prandm(protocol, k, m, shape=a.storage.shape)
+    
+    # c = (2^(k-1) + a + 2^m2 * r_dprime + r_prime).reveal()
+    two_pow_ksub1 = protocol.field.full_like(a.storage, 2**(k-1))
+    two_pow_m = protocol.field.full_like(a.storage, 2**m)
+    log.info(f"Player {communicator.rank}: before compute c")
+    c = protocol.field_add(
+        two_pow_ksub1,
+        protocol.field_add(
+            a,
+            protocol.field_add(
+                protocol.field_multiply(two_pow_m, r_dprime),
+                r_prime,
+            ),
+        ),
+    )
+    c = protocol.reveal(c)
+    log.info(f"Player {communicator.rank}: after compute c")
+
+    # Compute separate c_prime for m1 and m2.
+    c_prime = protocol.field.full_like(a.storage, c % 2**m)
+    u = protocol._public_bitwise_less_than(lhspub=c_prime, rhs=r)
+    
+    log.info(f"Player {communicator.rank}: after ltl")
+    log.info(f"Player {communicator.rank}: after ltl: u = {protocol.reveal(u)}")
+    log.info(f"Player {communicator.rank}: after ltl: c_prime = {c_prime}")
+    
+    # a_prime = c_prime - r_prime + u * 2^m
+    a_prime = protocol.field_add(
+        protocol.field_subtract(
+            c_prime,
+            r_prime
+        ),
+        protocol.field_multiply(u, two_pow_m),
+    )
+    
+    a_prime_clear = protocol.reveal(a_prime)[0]
+    log.info(f"Player {communicator.rank}: after compute a_prime")
+    log.info(f"Player {communicator.rank}: a_prime = {a_prime_clear} = {bin(a_prime_clear)}")
+    return a_prime
+
+def trunc_bot(
+    protocol: AdditiveProtocolSuite,
+    a: AdditiveArrayShare,
+    k: int,
+    m: int,
+) -> AdditiveArrayShare:
+    """
+    Truncate the bottom bits of the `k`-bit integer `a`. Returns the integer
+    corresponding to the bits in the range `[m:]` (least-significant bit first).
+    """
+    communicator = protocol.communicator
+    log = Logger(logger=logging.getLogger(), communicator=communicator)
+    
+    a_prime = trunc_top(protocol, a, k, m)
+    invert = lambda x: pow(x, protocol.field.order - 2, protocol.field.order)
+    two_pow_m_inv = protocol.field.full_like(a.storage, invert(2**m))
+    d = protocol.field_multiply(
+        protocol.field_subtract(a, a_prime),
+        two_pow_m_inv,
+    )
+    
+    a_clear = protocol.reveal(a)[0]
+    trunc_a = int(bin(a_clear)[2:][:-m], 2)
+    log.info(f"Player {communicator.rank}: a = {a_clear} = {bin(a_clear)}, trunc_bot(a) = {trunc_a} = {bin(trunc_a)}")
+    
+    return d
+    
+def prandm(protocol: AdditiveProtocolSuite, k: int, m: int, shape: list[int]) -> (AdditiveArrayShare, AdditiveArrayShare, AdditiveArrayShare):
     # r_dprime = k + KAPPA - m
-    _, r_dprime = protocol.random_bitwise_secret(bits=k + KAPPA - m)
-    r, r_prime = protocol.random_bitwise_secret(bits=m)
-    return (r_dprime, r_prime, r)
+    _, r_dprime = protocol.random_bitwise_secret(bits=k + KAPPA - m, shape=shape)
+    r, r_prime = protocol.random_bitwise_secret(bits=m, shape=shape)
+    return r_dprime, r_prime, r
 
 def compose(
     protocol: AdditiveProtocolSuite,
@@ -140,6 +254,8 @@ def main(communicator: SocketCommunicator):
     y = evaluate(protocol, key, hx)
     
     y_revealed = protocol.reveal(y)
-    log.info(f"Output (Player {communicator.rank}): {y_revealed}")
+    log.info(f"Player {communicator.rank}: y = {y_revealed}")
+    import json
+    log.info(f"Player {communicator.rank}: communicator.stats = \n{json.dumps(communicator.stats)}")
 
-SocketCommunicator.run(world_size=3, fn=main)
+SocketCommunicator.run(world_size=5, fn=main)
