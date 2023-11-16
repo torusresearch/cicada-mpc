@@ -43,9 +43,70 @@ def round(
     protocol: AdditiveProtocolSuite,
     x: AdditiveArrayShare,
 ) -> AdditiveArrayShare:
-    bits = protocol.bit_decompose(x, bits=BITS)    
-    slice = bits[:, LOG2Q-LOG2P:LOG2Q]
-    return protocol.bit_compose(slice)
+    # return protocol.right_shift(x, bits=LOG2Q)
+    return trunc(protocol, x, BITS, LOG2Q-LOG2P, LOG2Q)
+    
+    # bits = protocol.bit_decompose(x, bits=BITS)    
+    # slice = bits[:, LOG2Q-LOG2P:LOG2Q]
+    # return protocol.bit_compose(slice)
+
+def trunc(
+    protocol: AdditiveProtocolSuite,
+    a: AdditiveArrayShare,
+    k: int,
+    m1: int,
+    m2: int,
+) -> AdditiveArrayShare:
+    """
+    Truncate the top and bottom bits of the `k`-bit integer `a`. Returns the
+    integer corresponding to the bits in the range `[m1:m2]`.
+    """
+    (r_dprime, r_prime, r) = prandm(protocol, k, m2)
+    # c = (2^(k-1) + a + 2^m2 * r_dprime + r_prime).reveal()
+    c = protocol.field_add(
+        protocol.field(2**(k-1)),
+        protocol.field_add(
+            a,
+            protocol.field_add(
+                protocol.field_multiply(2**m2, r_dprime),
+                r_prime,
+            ),
+        ),
+    )
+    c = protocol.reveal(c)
+
+    # Compute separate c_prime for m1 and m2.
+    c1_prime, c2_prime = c % 2**m1, c % 2**m2
+    u1 = protocol._public_bitwise_less_than(c1_prime, r[:m1])
+    u2 = protocol._public_bitwise_less_than(c2_prime, r[:m2])
+    
+    # a1_prime = c1_prime - bit_compose(r[:m1]) + u1 * 2^m1
+    a1_prime = protocol.field_add(
+        protocol.field_subtract(
+            c1_prime,
+            protocol.bit_compose(r[:m1])
+        ),
+        protocol.field_multiply(u1, 2**m1),
+    )
+    # a2_prime = c2_prime - r_prime + u2 * 2^m2
+    a2_prime = protocol.field_add(
+        protocol.field_subtract(
+            c2_prime,
+            protocol.bit_compose(r[:m2])
+        ),
+        protocol.field_multiply(u2, 2**m2),
+    )
+    field_inverse = lambda x: pow(x, protocol.field.order - 2, protocol.field.order)
+    return protocol.field_multiply(
+        protocol.field_subtract(a2_prime, a1_prime),
+        field_inverse(2**m1),
+    )
+    
+def prandm(protocol: AdditiveProtocolSuite, k: int, m: int) -> (AdditiveArrayShare, AdditiveArrayShare, AdditiveArrayShare):
+    # r_dprime = k + KAPPA - m
+    _, r_dprime = protocol.random_bitwise_secret(bits=k + KAPPA - m)
+    r, r_prime = protocol.random_bitwise_secret(bits=m)
+    return (r_dprime, r_prime, r)
 
 def compose(
     protocol: AdditiveProtocolSuite,
