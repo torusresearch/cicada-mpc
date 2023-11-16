@@ -16,7 +16,7 @@ LOG2P = 8
 DIM = 512
 BITS = ((2**LOG2Q - 1)**2 * DIM).bit_length() # Maximum integer size.
 KAPPA = 40 # Statistical security level.
-L = 2 # math.ceil((ORDER.bit_length() + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
+L = math.ceil((ORDER.bit_length() + KAPPA) / LOG2P) # Number of p-bit elements required to fill up the target range.
 
 def key_gen(protocol: ActiveProtocolSuite) -> ActiveArrayShare:
     (bits, vals) = protocol.random_bitwise_secret(bits=LOG2Q, shape=(DIM,))
@@ -111,10 +111,10 @@ def trunc(
     # Compute separate c_prime for m1 and m2.
     c1_prime = protocol.field.full_like(a.additive.storage, c % 2**m1)
     c2_prime = protocol.field.full_like(a.additive.storage, c % 2**m2)
-    # u1 = protocol._public_bitwise_less_than(lhspub=c1_prime, rhs=slice_r(m1))
-    # u2 = protocol._public_bitwise_less_than(lhspub=c2_prime, rhs=slice_r(m2))
-    u1 = protocol.share(src=0, secret=numpy.full_like(a.additive.storage, 0), shape=a.additive.storage.shape)
-    u2 = protocol.share(src=0, secret=numpy.full_like(a.additive.storage, 0), shape=a.additive.storage.shape)
+    u1 = public_bitwise_less_than(protocol, lhspub=c1_prime, rhs=slice_r(m1))
+    u2 = public_bitwise_less_than(protocol, lhspub=c2_prime, rhs=slice_r(m2))
+    # u1 = protocol.share(src=0, secret=numpy.full_like(a.additive.storage, 0), shape=a.additive.storage.shape)
+    # u2 = protocol.share(src=0, secret=numpy.full_like(a.additive.storage, 0), shape=a.additive.storage.shape)
     
     log.info(f"Player {communicator.rank}: after ltl")
     # log.info(f"Player {communicator.rank}: after ltl: u1 = {protocol.reveal(u1)}, u2 = {protocol.reveal(u2)}")
@@ -265,6 +265,60 @@ def compose(
     
     prod = protocol.field_multiply(a, scalars)
     return protocol.sum(prod)
+
+def public_bitwise_less_than(protocol: ActiveProtocolSuite, *, lhspub: numpy.ndarray, rhs: ActiveArrayShare) -> ActiveArrayShare:    
+    if lhspub.shape != rhs.additive.storage.shape[:-1]:
+        raise ValueError('rhs is not of the expected shape - it should be the same as lhs except the last dimension') # pragma: no cover
+    bitwidth = rhs.additive.storage.shape[-1]
+    lhsbits = []
+    for val in lhspub:
+        tmplist = [int(x) for x in bin(val)[2:]]
+        if len(tmplist) < bitwidth:
+            tmplist = [0 for x in range(bitwidth-len(tmplist))] + tmplist
+        lhsbits.append(tmplist)
+    lhsbits = numpy.array(lhsbits, dtype=protocol.field.dtype)
+    assert(lhsbits.shape == rhs.additive.storage.shape)
+    one = numpy.array(1, dtype=protocol.field.dtype)
+    flatlhsbits = lhsbits.reshape((-1, lhsbits.shape[-1]))
+    flatrhsbits = ActiveArrayShare((
+        AdditiveArrayShare(rhs.additive.storage.reshape((-1, rhs.additive.storage.shape[-1]))),
+        ShamirArrayShare(rhs.shamir.storage.reshape((-1, rhs.shamir.storage.shape[-1]))),
+    ))
+    results=[]
+    for j in range(len(flatlhsbits)):
+        xord = []
+        preord = []
+        msbdiff=[]
+        rhs_bit_at_msb_diff = []
+        for i in range(bitwidth):
+            rhsbit = ActiveArrayShare((
+                AdditiveArrayShare(storage=numpy.array(flatrhsbits.additive.storage[j,i], dtype=protocol.field.dtype)),
+                ShamirArrayShare(storage=numpy.array(flatrhsbits.shamir.storage[j,i], dtype=protocol.field.dtype))
+            ))
+            if flatlhsbits[j][i] == 1:
+                xord.append(protocol.field_subtract(lhs=one, rhs=rhsbit))
+            else:
+                xord.append(rhsbit)
+        preord = [xord[0]]
+        for i in range(1, bitwidth):
+            preord.append(protocol.logical_or(lhs=preord[i-1], rhs=xord[i]))
+        msbdiff = [preord[0]]
+        for i in range(1,bitwidth):
+            msbdiff.append(protocol.field_subtract(lhs=preord[i], rhs=preord[i-1]))
+        for i in range(bitwidth):
+            rhsbit = ActiveArrayShare((
+                AdditiveArrayShare(storage=numpy.array(flatrhsbits.additive.storage[j,i], dtype=protocol.field.dtype)),
+                ShamirArrayShare(storage=numpy.array(flatrhsbits.shamir.storage[j,i], dtype=protocol.field.dtype))
+            ))
+            rhs_bit_at_msb_diff.append(protocol.field_multiply(rhsbit, msbdiff[i]))
+        result = rhs_bit_at_msb_diff[0]
+        for i in range(1,bitwidth):
+            result = protocol.field_add(lhs=result, rhs=rhs_bit_at_msb_diff[i])
+        results.append(result)
+    return ActiveArrayShare((
+        AdditiveArrayShare(numpy.array([x.additive.storage for x in results], dtype=protocol.field.dtype).reshape(rhs.additive.storage.shape[:-1])),
+        ShamirArrayShare(numpy.array([x.shamir.storage for x in results], dtype=protocol.field.dtype).reshape(rhs.shamir.storage.shape[:-1]))
+    ))
 
 def main(communicator: SocketCommunicator):
     log = Logger(logger=logging.getLogger(), communicator=communicator)
